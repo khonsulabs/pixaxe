@@ -1,0 +1,13 @@
+[package]
+name = "pxli"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+bytemuck = "1.15.0"
+cushy = { path = "../cushy" }
+rayon = "1.9.0"
+
+[patch."https://github.com/khonsulabs/kludgine"]
+kludgine = { path = "../kludgine" }
