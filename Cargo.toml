@@ -7,6 +7,7 @@ license = "GPL-3.0-or-later"
 [dependencies]
 bytemuck = "1.15.0"
 cushy = { path = "../cushy" }
+kempt = "0.2.4"
 rayon = "1.9.0"
 
 [patch."https://github.com/khonsulabs/kludgine"]
