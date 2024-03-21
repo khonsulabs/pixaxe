@@ -132,7 +132,7 @@ impl ImageChanges {
     }
 
     pub fn revert(&self, image: &mut Image) {
-        for layer in &self.layers {
+        for layer in self.layers.iter().rev() {
             match layer {
                 LayerChange::InsertLayer(index, _) => {
                     image.layers.remove(*index);
@@ -145,7 +145,7 @@ impl ImageChanges {
                 }
             }
         }
-        for palette in &self.palette {
+        for palette in self.palette.iter().rev() {
             palette.revert(&mut image.palette);
         }
     }
