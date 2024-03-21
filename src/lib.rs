@@ -45,8 +45,8 @@ impl Image {
                         found_layers.insert(layer.id);
                         if let Some(change) = layer.changes(other) {
                             layer_changes.push(LayerChange::Change(index, change));
-                            continue 'layers;
                         }
+                        continue 'layers;
                     }
                 }
 
@@ -59,19 +59,54 @@ impl Image {
             .layers
             .iter()
             .enumerate()
+            .rev()
             .filter(|(_, layer)| !found_layers.contains(&layer.id))
         {
             layer_changes.insert(0, LayerChange::Remove(index, other.clone()));
         }
 
+        let mut palette_changes = Vec::new();
+        let mut found_colors = Set::new();
+        for (index, color) in self.palette.iter().copied().enumerate() {
+            if other
+                .palette
+                .get(index)
+                .map_or(false, |other| *other == color)
+            {
+                found_colors.insert(color.0);
+            } else {
+                'colors: for other in other.palette.iter().copied() {
+                    if color == other {
+                        found_colors.insert(color.0);
+                        continue 'colors;
+                    }
+                }
+
+                // Our layer didn't exist, insert it instead
+                palette_changes.push(PaletteChange::InsertColor(index, color));
+            }
+        }
+
+        for (index, other) in other
+            .palette
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, color)| !found_colors.contains(&color.0))
+        {
+            palette_changes.insert(0, PaletteChange::RemoveColor(index, *other));
+        }
+
         ImageChanges {
             layers: layer_changes,
+            palette: palette_changes,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ImageChanges {
+    pub palette: Vec<PaletteChange>,
     pub layers: Vec<LayerChange>,
 }
 
@@ -90,6 +125,10 @@ impl ImageChanges {
                 }
             }
         }
+
+        for palette in &self.palette {
+            palette.apply(&mut image.palette);
+        }
     }
 
     pub fn revert(&self, image: &mut Image) {
@@ -106,12 +145,15 @@ impl ImageChanges {
                 }
             }
         }
+        for palette in &self.palette {
+            palette.revert(&mut image.palette);
+        }
     }
 }
 
 impl ImageChanges {
     pub fn is_empty(&self) -> bool {
-        self.layers.is_empty()
+        self.layers.is_empty() && self.palette.is_empty()
     }
 }
 
@@ -142,8 +184,16 @@ impl Pixel {
         }
     }
 
-    pub const fn is_some(&self) -> bool {
+    pub const fn is_some(self) -> bool {
         self.0.is_some()
+    }
+
+    pub const fn index(self) -> Option<u16> {
+        if let Some(index) = self.0 {
+            Some(index.0.get() - 1)
+        } else {
+            None
+        }
     }
 }
 
@@ -214,6 +264,44 @@ pub struct Edit {
 pub enum EditOp {
     Paint,
     Erase,
+    NewColor,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PaletteChange {
+    InsertColor(usize, Color),
+    RemoveColor(usize, Color),
+    Change(usize, Color),
+}
+
+impl PaletteChange {
+    pub fn apply(&self, palette: &mut Vec<Color>) {
+        match self {
+            PaletteChange::InsertColor(index, color) => {
+                palette.insert(*index, *color);
+            }
+            PaletteChange::RemoveColor(index, _) => {
+                palette.remove(*index);
+            }
+            PaletteChange::Change(index, color) => {
+                palette[*index] = *color;
+            }
+        }
+    }
+
+    pub fn revert(&self, palette: &mut Vec<Color>) {
+        match self {
+            PaletteChange::InsertColor(index, _) => {
+                palette.remove(*index);
+            }
+            PaletteChange::RemoveColor(index, color) => {
+                palette.insert(*index, *color);
+            }
+            PaletteChange::Change(index, color) => {
+                palette[*index] = *color;
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
