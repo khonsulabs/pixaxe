@@ -3,12 +3,14 @@ use std::ops::{AddAssign, Sub, SubAssign};
 use std::time::SystemTime;
 
 use cushy::figures::units::UPx;
-use cushy::figures::Size;
+use cushy::figures::{FloatConversion, Point, Size};
 use cushy::styles::Color;
 use kempt::Set;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
+
+pub mod tools;
 
 #[derive(Debug)]
 pub struct ImageFile {
@@ -25,6 +27,13 @@ pub struct Image {
 }
 
 impl Image {
+    pub fn layer_mut(&mut self, index: usize) -> ImageLayer<'_> {
+        ImageLayer {
+            image: self,
+            layer: index,
+        }
+    }
+
     pub fn changes(&self, other: &Image) -> ImageChanges {
         let mut layer_changes = Vec::new();
 
@@ -100,6 +109,23 @@ impl Image {
         ImageChanges {
             layers: layer_changes,
             palette: palette_changes,
+        }
+    }
+
+    pub fn coordinate_to_offset(&self, coord: Point<f32>) -> Option<usize> {
+        if coord.x < 0.
+            || coord.x >= self.size.width.into_float()
+            || coord.y < 0.
+            || coord.y >= self.size.height.into_float()
+        {
+            return None;
+        }
+
+        let offset = coord.x.floor() + coord.y.floor() * self.size.width.into_float();
+        if offset >= 0. {
+            Some(offset as usize)
+        } else {
+            None
         }
     }
 }
@@ -388,5 +414,18 @@ impl Image {
                     }
                 })
         }
+    }
+}
+
+pub struct ImageLayer<'a> {
+    image: &'a mut Image,
+    layer: usize,
+}
+
+impl ImageLayer<'_> {
+    pub fn pixel_mut(&mut self, coord: Point<f32>) -> Option<&mut Pixel> {
+        self.image
+            .coordinate_to_offset(coord)
+            .map(|index| &mut self.image.layers[self.layer].data[index])
     }
 }

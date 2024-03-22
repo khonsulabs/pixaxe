@@ -22,6 +22,7 @@ use cushy::widgets::color::RgbaPicker;
 use cushy::widgets::layers::{OverlayHandle, OverlayLayer};
 use cushy::window::{DeviceId, KeyEvent};
 use cushy::{ConstraintLimit, ModifiersExt, Run};
+use pxli::tools::{ImageState, Pencil, Tool};
 use pxli::{Edit, EditOp, Image, ImageFile, Layer, Pixel};
 
 const CHECKER_LIGHT: Color = Color(0xB0B0B0FF);
@@ -65,6 +66,8 @@ fn main() {
         keyboard_mode: KeyboardMode::default(),
         overlays: overlays.clone(),
         overlay: None,
+        tools: vec![Box::new(Pencil)],
+        selected_tool: 0,
     });
     let area = EditArea(data.clone()).make_widget();
     let area_id = area.id();
@@ -367,6 +370,8 @@ struct EditState {
     keyboard_mode: KeyboardMode,
     overlays: OverlayLayer,
     overlay: Option<OverlayHandle>,
+    tools: Vec<Box<dyn Tool>>,
+    selected_tool: usize,
 }
 
 impl EditState {
@@ -374,38 +379,29 @@ impl EditState {
         (widget_pos + self.scroll).map(|c| c.into_float() / self.zoom)
     }
 
-    fn image_coordinate_to_offset(&self, coord: Point<f32>) -> Option<usize> {
-        if coord.x < 0.
-            || coord.x >= self.image.size.width.into_float()
-            || coord.y < 0.
-            || coord.y >= self.image.size.height.into_float()
-        {
-            return None;
-        }
-
-        let offset = coord.x.floor() + coord.y.floor() * self.image.size.width.into_float();
-        if offset >= 0. {
-            Some(offset as usize)
-        } else {
-            None
-        }
-    }
-
     fn apply_drag_op(
         &mut self,
         coord: Point<Px>,
         context: &mut WidgetContext<'_>,
+        initial: bool,
     ) -> EventHandling {
         if let Some(mode) = self.drag_mode {
             match mode {
-                DragMode::Paint(color) => {
+                DragMode::ApplyTool(index, alt) => {
                     let coord = self.image_coordinate(coord);
-                    if let Some(offset) = self.image_coordinate_to_offset(coord) {
-                        if std::mem::replace(&mut self.image.layers[0].data[offset], color) != color
-                        {
-                            self.dirty = true;
-                            context.set_needs_redraw();
-                        }
+                    if self.tools[index].update(
+                        coord,
+                        self.image.layer_mut(0),
+                        ImageState {
+                            current_color: self.current_color,
+                            color_history: &self.color_history,
+                            original: &self.file.image.layers[0],
+                        },
+                        alt,
+                        initial,
+                    ) {
+                        self.dirty = true;
+                        context.set_needs_redraw();
                     }
                 }
                 DragMode::Scroll {
@@ -444,12 +440,25 @@ impl EditState {
 
     fn commit_drag_op(&mut self) {
         match self.drag_mode.take() {
-            Some(DragMode::Paint(color)) => {
-                self.commit_op(if color.is_some() {
-                    EditOp::Paint
+            Some(DragMode::ApplyTool(index, alternate)) => {
+                if let Some(op) = self.tools[index].complete(
+                    self.image.layer_mut(0),
+                    ImageState {
+                        current_color: self.current_color,
+                        color_history: &self.color_history,
+                        original: &self.file.image.layers[0],
+                    },
+                    alternate,
+                ) {
+                    self.commit_op(op);
                 } else {
-                    EditOp::Erase
-                });
+                    // TODO roll back?
+                }
+                // self.commit_op(if color.is_some() {
+                //     EditOp::Paint
+                // } else {
+                //     EditOp::Erase
+                // });
             }
             None | Some(DragMode::Scroll { .. }) => {}
         }
@@ -636,8 +645,8 @@ impl Widget for EditArea {
         state.keyboard_mode = KeyboardMode::default();
 
         state.drag_mode = match button {
-            MouseButton::Right => Some(DragMode::Paint(Pixel::clear())),
-            MouseButton::Left => Some(DragMode::Paint(state.current_color)),
+            MouseButton::Right => Some(DragMode::ApplyTool(state.selected_tool, true)),
+            MouseButton::Left => Some(DragMode::ApplyTool(state.selected_tool, false)),
             MouseButton::Middle => Some(DragMode::Scroll {
                 start_scroll: state.scroll,
                 start_location: location,
@@ -645,7 +654,7 @@ impl Widget for EditArea {
             _ => None,
         };
 
-        state.apply_drag_op(location, context)
+        state.apply_drag_op(location, context, true)
     }
 
     fn mouse_drag(
@@ -656,7 +665,7 @@ impl Widget for EditArea {
         context: &mut EventContext<'_>,
     ) {
         let mut state = self.0.lock();
-        state.apply_drag_op(location, context);
+        state.apply_drag_op(location, context, false);
     }
 
     fn mouse_up(
@@ -682,7 +691,8 @@ impl Widget for EditArea {
         let mut state = self.0.lock();
         state.hovered = Some(location);
         state
-            .image_coordinate_to_offset(state.image_coordinate(location))
+            .image
+            .coordinate_to_offset(state.image_coordinate(location))
             .map(|_| CursorIcon::Crosshair)
     }
 
@@ -694,7 +704,7 @@ impl Widget for EditArea {
 
 #[derive(Debug, Clone, Copy)]
 enum DragMode {
-    Paint(Pixel),
+    ApplyTool(usize, bool),
     Scroll {
         start_scroll: Point<Px>,
         start_location: Point<Px>,
