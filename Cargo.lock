@@ -1842,6 +1842,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8afb450f006bf6385ca15ef45d71d2288452bc3683ce2e2cacc0d18e4be60b58"
 
 [[package]]
+name = "pixaxe"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "cushy",
+ "kempt",
+ "rayon",
+]
+
+[[package]]
 name = "pkg-config"
 version = "0.3.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1938,16 +1948,6 @@ checksum = "8021cf59c8ec9c432cfc2526ac6b8aa508ecaf29cd415f271b8406c1b851c3fd"
 dependencies = [
  "quote",
  "syn 2.0.53",
-]
-
-[[package]]
-name = "pxli"
-version = "0.0.0"
-dependencies = [
- "bytemuck",
- "cushy",
- "kempt",
- "rayon",
 ]
 
 [[package]]

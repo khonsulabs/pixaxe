@@ -1,8 +1,7 @@
 [package]
-name = "pxli"
+name = "pixaxe"
 version = "0.0.0"
 edition = "2021"
-license = "GPL-3.0-or-later"
 
 [dependencies]
 bytemuck = "1.15.0"

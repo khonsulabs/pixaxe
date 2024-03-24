@@ -22,8 +22,8 @@ use cushy::widgets::color::RgbaPicker;
 use cushy::widgets::layers::{OverlayHandle, OverlayLayer};
 use cushy::window::{DeviceId, KeyEvent};
 use cushy::{ConstraintLimit, ModifiersExt, Run};
-use pxli::tools::{ImageState, Pencil, Tool};
-use pxli::{Edit, EditOp, Image, ImageFile, Layer, Pixel};
+use pixaxe::tools::{ImageState, Pencil, Tool};
+use pixaxe::{Edit, EditOp, Image, ImageFile, Layer, Pixel};
 
 const CHECKER_LIGHT: Color = Color(0xB0B0B0FF);
 const CHECKER_DARK: Color = Color(0x404040FF);
@@ -39,7 +39,7 @@ fn main() {
         layers: vec![Layer {
             id: 0,
             data: vec![Pixel::default(); usize::from(INITIAL_WIDTH * INITIAL_HEIGHT)],
-            blend: pxli::BlendMode::Average,
+            blend: pixaxe::BlendMode::Average,
         }],
         palette: vec![Color::RED],
     };
