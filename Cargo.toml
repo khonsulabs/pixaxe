@@ -5,9 +5,14 @@ edition = "2021"
 
 [dependencies]
 bytemuck = "1.15.0"
+crc32fast = "1.4.0"
 cushy = { path = "../cushy" }
 kempt = "0.2.4"
+memchr = "2.7.1"
+ordered-varint = "2.0.0"
+q_compress = "0.11.7"
 rayon = "1.9.0"
+rfd = "0.14.1"
 
 [patch."https://github.com/khonsulabs/kludgine"]
 kludgine = { path = "../kludgine" }

@@ -1,22 +1,78 @@
+use std::collections::VecDeque;
+use std::fmt::Display;
+use std::io;
 use std::num::NonZeroU16;
 use std::ops::{AddAssign, Sub, SubAssign};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use cushy::figures::units::UPx;
 use cushy::figures::{FloatConversion, Point, Size};
 use cushy::styles::Color;
+use file::File;
 use kempt::Set;
+use q_compress::data_types::NumberLike;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+mod file;
 pub mod tools;
+pub use file::FilePos;
 
 #[derive(Debug)]
-pub struct ImageFile {
+
+pub struct FileData {
     pub image: Image,
     pub history: Vec<Edit>,
     pub undone: Vec<Edit>,
+}
+
+#[derive(Debug)]
+pub struct ImageFile {
+    pub data: FileData,
+    on_disk: Option<File>,
+}
+
+impl ImageFile {
+    pub fn new(image: Image) -> Self {
+        Self {
+            data: FileData {
+                image,
+                history: Vec::new(),
+                undone: Vec::new(),
+            },
+            on_disk: None,
+        }
+    }
+
+    pub fn load(path: PathBuf) -> io::Result<Self> {
+        File::load(path)
+    }
+
+    pub const fn on_disk(&self) -> bool {
+        self.on_disk.is_some()
+    }
+
+    pub fn save_as(&mut self, path: PathBuf) -> io::Result<()> {
+        if let Some(disk_state) = &mut self.on_disk {
+            disk_state.save_as(path, &mut self.data)
+        } else {
+            self.on_disk = Some(File::create(path, &mut self.data)?);
+            Ok(())
+        }
+    }
+
+    pub fn save(&mut self) -> io::Result<()> {
+        let Some(disk_state) = &mut self.on_disk else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "image path never given",
+            ));
+        };
+
+        disk_state.save(&mut self.data)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -34,11 +90,11 @@ impl Image {
         }
     }
 
-    pub fn changes(&self, other: &Image) -> ImageChanges {
+    pub fn changes(&mut self, other: &Image) -> ImageChanges {
         let mut layer_changes = Vec::new();
 
         let mut found_layers = Set::new();
-        'layers: for (index, layer) in self.layers.iter().enumerate() {
+        'layers: for (index, layer) in self.layers.iter_mut().enumerate() {
             if let Some(other) = other
                 .layers
                 .get(index)
@@ -60,7 +116,7 @@ impl Image {
                 }
 
                 // Our layer didn't exist, insert it instead
-                layer_changes.push(LayerChange::InsertLayer(index, layer.clone()));
+                layer_changes.push(LayerChange::Insert(index, layer.clone()));
             }
         }
 
@@ -130,7 +186,7 @@ impl Image {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ImageChanges {
     pub palette: Vec<PaletteChange>,
     pub layers: Vec<LayerChange>,
@@ -140,7 +196,7 @@ impl ImageChanges {
     pub fn apply(&self, image: &mut Image) {
         for layer in &self.layers {
             match layer {
-                LayerChange::InsertLayer(index, layer) => {
+                LayerChange::Insert(index, layer) => {
                     image.layers.insert(*index, layer.clone());
                 }
                 LayerChange::Change(index, changes) => {
@@ -160,7 +216,7 @@ impl ImageChanges {
     pub fn revert(&self, image: &mut Image) {
         for layer in self.layers.iter().rev() {
             match layer {
-                LayerChange::InsertLayer(index, _) => {
+                LayerChange::Insert(index, _) => {
                     image.layers.remove(*index);
                 }
                 LayerChange::Change(index, changes) => {
@@ -223,6 +279,44 @@ impl Pixel {
     }
 }
 
+impl Display for Pixel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.into_u16(), f)
+    }
+}
+
+impl NumberLike for Pixel {
+    type Signed = <u16 as NumberLike>::Signed;
+    type Unsigned = <u16 as NumberLike>::Unsigned;
+
+    const HEADER_BYTE: u8 = u16::HEADER_BYTE;
+    const PHYSICAL_BITS: usize = u16::PHYSICAL_BITS;
+
+    fn to_unsigned(self) -> Self::Unsigned {
+        self.into_u16()
+    }
+
+    fn from_unsigned(off: Self::Unsigned) -> Self {
+        Self::from_u16(u16::from_unsigned(off))
+    }
+
+    fn to_signed(self) -> Self::Signed {
+        self.into_u16().to_signed()
+    }
+
+    fn from_signed(signed: Self::Signed) -> Self {
+        Self::from_u16(u16::from_signed(signed))
+    }
+
+    fn to_bytes(self) -> Vec<u8> {
+        self.into_u16().to_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> q_compress::errors::QCompressResult<Self> {
+        u16::from_bytes(bytes).map(Self::from_u16)
+    }
+}
+
 impl Sub for Pixel {
     type Output = u16;
 
@@ -243,15 +337,25 @@ impl AddAssign<u16> for Pixel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct LayerId(u64);
+
+impl LayerId {
+    pub const fn first() -> Self {
+        Self(0)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Layer {
-    pub id: usize,
+    pub id: LayerId,
     pub data: Vec<Pixel>,
     pub blend: BlendMode,
+    pub file_offset: FilePos,
 }
 
 impl Layer {
-    pub fn changes(&self, other: &Layer) -> Option<LayerDelta> {
+    pub fn changes(&mut self, other: &Layer) -> Option<LayerDelta> {
         let mut pixel_changes = Vec::new();
         let mut pixels = self.data.iter().enumerate().zip(&other.data);
 
@@ -269,6 +373,7 @@ impl Layer {
         }
 
         pixel_changes.extend(pixels.map(|((_, this), other)| *this - *other));
+        self.file_offset = FilePos::default();
 
         Some(LayerDelta(pixel_changes))
     }
@@ -276,7 +381,26 @@ impl Layer {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum BlendMode {
-    Average,
+    Average = 0,
+}
+
+impl TryFrom<u8> for BlendMode {
+    type Error = InvalidBlendMode;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Average),
+            _ => Err(InvalidBlendMode),
+        }
+    }
+}
+
+pub struct InvalidBlendMode;
+
+impl From<InvalidBlendMode> for io::Error {
+    fn from(_value: InvalidBlendMode) -> Self {
+        io::Error::new(io::ErrorKind::InvalidData, "invalid blend mode")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -284,13 +408,35 @@ pub struct Edit {
     pub when: SystemTime,
     pub op: EditOp,
     pub changes: ImageChanges,
+    pub file_offset: FilePos,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum EditOp {
-    Paint,
+    Paint = 0,
     Erase,
     NewColor,
+}
+
+impl TryFrom<u8> for EditOp {
+    type Error = InvalidEditOp;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Paint),
+            1 => Ok(Self::Erase),
+            2 => Ok(Self::NewColor),
+            _ => Err(InvalidEditOp),
+        }
+    }
+}
+
+pub struct InvalidEditOp;
+
+impl From<InvalidEditOp> for io::Error {
+    fn from(_value: InvalidEditOp) -> Self {
+        io::Error::new(io::ErrorKind::InvalidData, "invalid edit op")
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -332,7 +478,7 @@ impl PaletteChange {
 
 #[derive(Debug, Clone)]
 pub enum LayerChange {
-    InsertLayer(usize, Layer),
+    Insert(usize, Layer),
     Change(usize, LayerDelta),
     Remove(usize, Layer),
 }
@@ -427,5 +573,43 @@ impl ImageLayer<'_> {
         self.image
             .coordinate_to_offset(coord)
             .map(|index| &mut self.image.layers[self.layer].data[index])
+    }
+}
+
+#[derive(Debug)]
+pub struct ColorHistory(VecDeque<Pixel>);
+
+impl ColorHistory {
+    pub fn new(initial_color: Pixel) -> Self {
+        Self(VecDeque::from_iter([initial_color]))
+    }
+
+    pub fn current(&self) -> Pixel {
+        self.0[0]
+    }
+
+    pub fn previous(&self) -> Option<Pixel> {
+        self.0.get(1).copied()
+    }
+
+    pub fn push(&mut self, color: Pixel) {
+        self.0.retain(|c| *c != color);
+        self.0.push_front(color);
+    }
+
+    pub fn swap_previous(&mut self) {
+        if self.0.len() > 1 {
+            self.0.swap(0, 1);
+        }
+    }
+
+    pub fn cycle_by(&mut self, amount: i16) {
+        if amount < 0 {
+            self.0
+                .rotate_left(usize::try_from(-amount).expect("infallible"));
+        } else {
+            self.0
+                .rotate_right(usize::try_from(amount).expect("infallible"));
+        }
     }
 }

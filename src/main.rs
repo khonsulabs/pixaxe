@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -12,6 +11,7 @@ use cushy::kludgine::app::winit::keyboard::Key;
 use cushy::kludgine::app::winit::window::CursorIcon;
 use cushy::kludgine::shapes::{PathBuilder, Shape, StrokeOptions};
 use cushy::kludgine::text::{Text, TextOrigin};
+use cushy::kludgine::wgpu::rwh::HasWindowHandle;
 use cushy::kludgine::{wgpu, DrawableExt, Texture};
 use cushy::styles::{Color, ColorExt};
 use cushy::value::{Dynamic, Source};
@@ -23,35 +23,58 @@ use cushy::widgets::layers::{OverlayHandle, OverlayLayer};
 use cushy::window::{DeviceId, KeyEvent};
 use cushy::{ConstraintLimit, ModifiersExt, Run};
 use pixaxe::tools::{ImageState, Pencil, Tool};
-use pixaxe::{Edit, EditOp, Image, ImageFile, Layer, Pixel};
+use pixaxe::{ColorHistory, Edit, EditOp, FilePos, Image, ImageFile, Layer, LayerId, Pixel};
 
 const CHECKER_LIGHT: Color = Color(0xB0B0B0FF);
 const CHECKER_DARK: Color = Color(0x404040FF);
 const INITIAL_WIDTH: u16 = 128;
 const INITIAL_HEIGHT: u16 = 128;
+// https://lospec.com/palette-list/sweetie-16
+const SWEETIE_16: [Color; 16] = [
+    Color(0x1a1c2cff),
+    Color(0x5d275dff),
+    Color(0xb13e53ff),
+    Color(0xef7d57ff),
+    Color(0xffcd75ff),
+    Color(0xa7f070ff),
+    Color(0x38b764ff),
+    Color(0x257179ff),
+    Color(0x29366fff),
+    Color(0x3b5dc9ff),
+    Color(0x41a6f6ff),
+    Color(0x73eff7ff),
+    Color(0xf4f4f4ff),
+    Color(0x94b0c2ff),
+    Color(0x566c86ff),
+    Color(0x333c57ff),
+];
+const INITIAL_COLOR: Pixel = Pixel::indexed(12);
+const INITIAL_BACKGROUND: Pixel = Pixel::indexed(0);
 
 fn main() {
-    let image = Image {
-        size: Size::new(
-            UPx::new(u32::from(INITIAL_WIDTH)),
-            UPx::new(u32::from(INITIAL_HEIGHT)),
-        ),
-        layers: vec![Layer {
-            id: 0,
-            data: vec![Pixel::default(); usize::from(INITIAL_WIDTH * INITIAL_HEIGHT)],
-            blend: pixaxe::BlendMode::Average,
-        }],
-        palette: vec![Color::RED],
+    let file = if let Some(path) = std::env::args().nth(1) {
+        ImageFile::load(path.into()).expect("error reading file")
+    } else {
+        let image = Image {
+            size: Size::new(
+                UPx::new(u32::from(INITIAL_WIDTH)),
+                UPx::new(u32::from(INITIAL_HEIGHT)),
+            ),
+            layers: vec![Layer {
+                id: LayerId::first(),
+                data: vec![INITIAL_BACKGROUND; usize::from(INITIAL_WIDTH * INITIAL_HEIGHT)],
+                blend: pixaxe::BlendMode::Average,
+                file_offset: FilePos::default(),
+            }],
+            palette: SWEETIE_16.to_vec(),
+        };
+        ImageFile::new(image)
     };
 
     let overlays = OverlayLayer::default();
     let data = Dynamic::new(EditState {
-        image: image.clone(),
-        file: ImageFile {
-            image,
-            history: Vec::new(),
-            undone: Vec::new(),
-        },
+        image: file.data.image.clone(),
+        file,
         texture_and_buffer: OnceLock::new(),
         dirty: true,
         zoom: 2.,
@@ -61,8 +84,7 @@ fn main() {
         max_scroll: Point::ZERO,
         render_size: Size::ZERO,
         hovered: None,
-        current_color: Pixel::indexed(0),
-        color_history: VecDeque::new(),
+        color_history: ColorHistory::new(INITIAL_COLOR),
         keyboard_mode: KeyboardMode::default(),
         overlays: overlays.clone(),
         overlay: None,
@@ -119,32 +141,61 @@ impl WrapperWidget for Root {
         context: &mut EventContext<'_>,
     ) -> EventHandling {
         let mut state = self.data.lock();
-        state.keyboard_mode = KeyboardMode::default();
-        let delta_y = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 10.,
-            MouseScrollDelta::PixelDelta(px) => px.y as f32,
-        };
+        if context.modifiers().state().alt_key() {
+            // Cycle colors
+            let index_delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y.ceil() as i16,
+                MouseScrollDelta::PixelDelta(px) => px.y.ceil() as i16,
+            };
+            if context.modifiers().state().shift_key() {
+                // Cycle through previously selected colors
+                state.cycle_color(index_delta);
+            } else {
+                // Cycle through palette colors
+                let mut next_color =
+                    i32::from(state.color_history.current().into_u16()) - i32::from(index_delta);
+                let palette_len =
+                    i32::try_from(state.image.palette.len()).expect("too many colors") + 1;
+                while next_color < 0 {
+                    next_color += palette_len;
+                }
+                while next_color >= palette_len {
+                    next_color -= palette_len;
+                }
+                state.color_history.push(Pixel::from_u16(
+                    u16::try_from(next_color).expect("too many colors"),
+                ));
+            }
+        } else {
+            // Zoom
+            state.keyboard_mode = KeyboardMode::default();
+            let delta_y = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 10.,
+                MouseScrollDelta::PixelDelta(px) => px.y as f32,
+            };
 
-        let current_zoomed_size = state.image.size * state.zoom;
-        let focal_point = state
-            .hovered
-            .unwrap_or_else(|| Point::from(state.render_size / 2));
-        let current_hover_unscaled = focal_point / state.zoom;
-        let zoom_amount = state.zoom * delta_y / 100.;
-        state.zoom += zoom_amount;
-        state.zoom = (state.zoom * 10.).round() / 10.;
-        let new_size = state.image.size * state.zoom;
+            let current_zoomed_size = state.image.size * state.zoom;
+            let focal_point = state
+                .hovered
+                .unwrap_or_else(|| Point::from(state.render_size / 2));
+            let current_hover_unscaled = focal_point / state.zoom;
+            let zoom_amount = state.zoom * delta_y / 100.;
+            state.zoom += zoom_amount;
+            state.zoom = (state.zoom * 10.).round() / 10.;
+            let new_size = state.image.size * state.zoom;
 
-        let hover_adjust = current_hover_unscaled * state.zoom - focal_point;
+            let hover_adjust = current_hover_unscaled * state.zoom - focal_point;
 
-        if new_size.width.into_signed() > state.render_size.width {
-            let x_ratio = new_size.width.into_float() / current_zoomed_size.width.into_float();
-            state.scroll.x = state.scroll.x.max(Px::ZERO) * x_ratio + hover_adjust.x;
-        }
+            if new_size.width.into_signed() > state.render_size.width {
+                let x_ratio = new_size.width.into_float() / current_zoomed_size.width.into_float();
+                state.scroll.x = state.scroll.x.max(Px::ZERO) * x_ratio + hover_adjust.x;
+            }
 
-        if new_size.height.into_signed() > state.render_size.height {
-            let y_ratio = new_size.height.into_float() / current_zoomed_size.height.into_float();
-            state.scroll.y = state.scroll.y.max(Px::ZERO) * y_ratio + hover_adjust.y;
+            if new_size.height.into_signed() > state.render_size.height {
+                let y_ratio =
+                    new_size.height.into_float() / current_zoomed_size.height.into_float();
+                state.scroll.y = state.scroll.y.max(Px::ZERO) * y_ratio + hover_adjust.y;
+            }
         }
 
         context.set_needs_redraw();
@@ -219,7 +270,7 @@ impl WrapperWidget for Root {
                             let selected_color = Dynamic::new(
                                 state
                                     .color_history
-                                    .front()
+                                    .previous()
                                     .and_then(|px| px.index())
                                     .map_or(Color::WHITE, |index| {
                                         state.image.palette[usize::from(index)]
@@ -237,7 +288,9 @@ impl WrapperWidget for Root {
                                                     let new_index =
                                                         state.image.palette.len() as u16;
                                                     state.image.palette.push(selected_color.get());
-                                                    state.current_color = Pixel::indexed(new_index);
+                                                    state
+                                                        .color_history
+                                                        .push(Pixel::indexed(new_index));
                                                     state.commit_op(EditOp::NewColor);
                                                     state.overlays.dismiss_all();
                                                 }
@@ -251,18 +304,27 @@ impl WrapperWidget for Root {
                             );
                             new_mode = Some(KeyboardMode::Default);
                         } else {
-                            let mut index = 0;
-                            let current_color = state.current_color;
-                            while let Some(color) = state.color_history.get(index) {
-                                if *color == current_color {
-                                    state.color_history.remove(index);
-                                } else {
-                                    index += 1;
-                                }
-                            }
-                            state.color_history.insert(0, current_color);
-                            state.current_color = Pixel::clear();
+                            state.color_history.push(Pixel::clear());
                             new_mode = Some(KeyboardMode::SelectColor(0));
+                        }
+                    }
+                    HANDLED
+                }
+                "s" if context.modifiers().primary() => {
+                    if input.state.is_pressed() {
+                        if context.modifiers().state().shift_key() {
+                            save_as(
+                                self.data.clone(),
+                                context.window().winit().expect("winit handle missing"),
+                            );
+                        } else if state.file.on_disk() {
+                            // TODO don't panic on io error
+                            state.file.save().unwrap();
+                        } else {
+                            save_as(
+                                self.data.clone(),
+                                context.window().winit().expect("winit handle missing"),
+                            );
                         }
                     }
                     HANDLED
@@ -329,10 +391,7 @@ impl WrapperWidget for Root {
                 }
                 "x" if !context.modifiers().possible_shortcut() => {
                     if input.state.is_pressed() {
-                        if let Some(color) = state.color_history.pop_front() {
-                            state.color_history.push_front(state.current_color);
-                            state.current_color = color;
-                        }
+                        state.color_history.swap_previous();
                     }
                     HANDLED
                 }
@@ -347,6 +406,22 @@ impl WrapperWidget for Root {
 
         result
     }
+}
+
+fn save_as(state: Dynamic<EditState>, parent: &impl HasWindowHandle) {
+    // TODO we should prevent multiple dialogs from being open at the same time
+    let dialog = rfd::FileDialog::new()
+        .set_file_name("unnamed.paxe")
+        .set_parent(parent)
+        .add_filter("Pixaxe Image", &["paxe"])
+        .set_can_create_directories(true);
+    std::thread::spawn(move || {
+        if let Some(path) = dialog.save_file() {
+            let mut state = state.lock();
+            // TODO don't panic on io error
+            state.file.save_as(path).unwrap();
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -365,8 +440,7 @@ struct EditState {
     max_scroll: Point<Px>,
     render_size: Size<Px>,
     hovered: Option<Point<Px>>,
-    current_color: Pixel,
-    color_history: VecDeque<Pixel>,
+    color_history: ColorHistory,
     keyboard_mode: KeyboardMode,
     overlays: OverlayLayer,
     overlay: Option<OverlayHandle>,
@@ -393,9 +467,8 @@ impl EditState {
                         coord,
                         self.image.layer_mut(0),
                         ImageState {
-                            current_color: self.current_color,
                             color_history: &self.color_history,
-                            original: &self.file.image.layers[0],
+                            original: &self.file.data.image.layers[0],
                         },
                         alt,
                         initial,
@@ -444,9 +517,8 @@ impl EditState {
                 if let Some(op) = self.tools[index].complete(
                     self.image.layer_mut(0),
                     ImageState {
-                        current_color: self.current_color,
                         color_history: &self.color_history,
-                        original: &self.file.image.layers[0],
+                        original: &self.file.data.image.layers[0],
                     },
                     alternate,
                 ) {
@@ -462,6 +534,10 @@ impl EditState {
             }
             None | Some(DragMode::Scroll { .. }) => {}
         }
+    }
+
+    fn cycle_color(&mut self, amount: i16) {
+        self.color_history.cycle_by(amount);
     }
 
     fn constrain_scroll(&mut self, scaled_size: Size<Px>) {
@@ -485,36 +561,37 @@ impl EditState {
     }
 
     fn commit_op(&mut self, op: EditOp) {
-        let changes = self.image.changes(&self.file.image);
+        let changes = self.image.changes(&self.file.data.image);
         if !changes.is_empty() {
-            self.file.undone.clear();
+            self.file.data.undone.clear();
 
-            self.file.history.push(Edit {
+            self.file.data.history.push(Edit {
                 when: SystemTime::now(),
                 op,
                 changes,
+                file_offset: FilePos::default(),
             });
-            self.file.image = self.image.clone();
+            self.file.data.image = self.image.clone();
         }
     }
 
     fn ensure_consistency(&mut self) {
-        if self.current_color.index().map_or(false, |index| {
+        if self.color_history.current().index().map_or(false, |index| {
             usize::from(index) >= self.image.palette.len()
         }) {
-            self.current_color = if self.image.palette.is_empty() {
+            self.color_history.push(if self.image.palette.is_empty() {
                 Pixel::clear()
             } else {
                 Pixel::indexed((self.image.palette.len() - 1) as u16)
-            };
+            });
         }
     }
 
     fn undo(&mut self, context: &mut WidgetContext<'_>) {
-        if let Some(edit) = self.file.history.pop() {
+        if let Some(edit) = self.file.data.history.pop() {
             edit.changes.revert(&mut self.image);
-            self.file.image = self.image.clone();
-            self.file.undone.push(edit);
+            self.file.data.image = self.image.clone();
+            self.file.data.undone.push(edit);
             self.dirty = true;
             context.set_needs_redraw();
             self.ensure_consistency();
@@ -522,10 +599,10 @@ impl EditState {
     }
 
     fn redo(&mut self, context: &mut WidgetContext<'_>) {
-        if let Some(edit) = self.file.undone.pop() {
+        if let Some(edit) = self.file.data.undone.pop() {
             edit.changes.apply(&mut self.image);
-            self.file.image = self.image.clone();
-            self.file.history.push(edit);
+            self.file.data.image = self.image.clone();
+            self.file.data.history.push(edit);
             self.dirty = true;
             context.set_needs_redraw();
             self.ensure_consistency();
@@ -537,7 +614,7 @@ impl EditState {
             KeyboardMode::SelectColor(picked_color) => {
                 let new_color = picked_color * 10 + u16::from(number);
                 if usize::from(new_color) <= self.image.palette.len() {
-                    self.current_color = Pixel::from_u16(new_color);
+                    self.color_history.push(Pixel::from_u16(new_color));
                     self.keyboard_mode = KeyboardMode::SelectColor(new_color);
                 } else {
                     self.keyboard_mode = KeyboardMode::Default;
@@ -743,8 +820,8 @@ impl Widget for Palette {
 
         let data = self.data.lock();
         self.size = context.gfx.size().into_lp(context.gfx.scale());
-        let selected_index = data.current_color.index().map(usize::from);
-        self.swatch_size = Lp::points(32);
+        let selected_index = data.color_history.current().index().map(usize::from);
+        self.swatch_size = Lp::points(32); // TODO this should be configurable
         let lp_wide = context.gfx.size().width.into_lp(context.gfx.scale());
         self.swatches_per_row = usize::try_from((lp_wide / self.swatch_size).ceil().get())
             .expect("too big")
@@ -780,7 +857,7 @@ impl Widget for Palette {
                             .draw_shape(&Shape::filled_rect(swatch_rect, *color));
                         let text_color = color.most_contrasting(&[Color::WHITE, Color::BLACK]);
                         context.gfx.draw_text(
-                            Text::new(&format!("c{index}"), text_color)
+                            Text::new(&format!("c{}", index + 1), text_color)
                                 .origin(TextOrigin::Center)
                                 .translate_by(midpoint),
                         );
@@ -849,10 +926,12 @@ impl Widget for Palette {
         let mut data = self.data.lock();
         match index.cmp(&data.image.palette.len()) {
             Ordering::Less => {
-                data.current_color = Pixel::indexed(u16::try_from(index).expect("too many colors"));
+                data.color_history.push(Pixel::indexed(
+                    u16::try_from(index).expect("too many colors"),
+                ));
             }
             Ordering::Equal => {
-                data.current_color = Pixel::clear();
+                data.color_history.push(Pixel::clear());
             }
             Ordering::Greater => {
                 eprintln!("TODO: Show create color")

@@ -1,16 +1,14 @@
-use std::collections::VecDeque;
 use std::fmt::Debug;
 
 use cushy::figures::Point;
 
-use crate::{EditOp, ImageLayer, Layer, Pixel};
+use crate::{ColorHistory, EditOp, ImageLayer, Layer};
 
 mod pencil;
 pub use pencil::Pencil;
 
 pub struct ImageState<'a> {
-    pub current_color: Pixel,
-    pub color_history: &'a VecDeque<Pixel>,
+    pub color_history: &'a ColorHistory,
     pub original: &'a Layer,
 }
 

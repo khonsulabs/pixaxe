@@ -19,7 +19,7 @@ impl Tool for Pencil {
             let color = if alternate {
                 Pixel::clear()
             } else {
-                state.current_color
+                state.color_history.current()
             };
 
             return std::mem::replace(pixel, color) != color;
