@@ -22,7 +22,7 @@ use cushy::widgets::color::RgbaPicker;
 use cushy::widgets::layers::{OverlayHandle, OverlayLayer};
 use cushy::window::{DeviceId, KeyEvent};
 use cushy::{ConstraintLimit, ModifiersExt, Run};
-use pixaxe::tools::{ImageState, Pencil, Tool};
+use pixaxe::tools::{Fill, ImageState, Pencil, Tool};
 use pixaxe::{ColorHistory, Edit, EditOp, FilePos, Image, ImageFile, Layer, LayerId, Pixel};
 
 const CHECKER_LIGHT: Color = Color(0xB0B0B0FF);
@@ -88,7 +88,7 @@ fn main() {
         keyboard_mode: KeyboardMode::default(),
         overlays: overlays.clone(),
         overlay: None,
-        tools: vec![Box::new(Pencil)],
+        tools: vec![Box::new(Pencil), Box::new(Fill)],
         selected_tool: 0,
     });
     let area = EditArea(data.clone()).make_widget();
@@ -470,8 +470,8 @@ impl EditState {
                             color_history: &self.color_history,
                             original: &self.file.data.image.layers[0],
                         },
-                        alt,
                         initial,
+                        alt,
                     ) {
                         self.dirty = true;
                         context.set_needs_redraw();
@@ -620,7 +620,12 @@ impl EditState {
                     self.keyboard_mode = KeyboardMode::Default;
                 }
             }
-            KeyboardMode::Default => {}
+            KeyboardMode::Default => {
+                let tool = usize::from(number);
+                if tool > 0 && tool <= self.tools.len() {
+                    self.selected_tool = tool - 1;
+                }
+            }
         }
     }
 }

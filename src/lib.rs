@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use cushy::figures::units::UPx;
-use cushy::figures::{FloatConversion, Point, Size};
+use cushy::figures::{Point, Size};
 use cushy::styles::Color;
 use file::File;
 use kempt::Set;
@@ -168,21 +168,15 @@ impl Image {
         }
     }
 
-    pub fn coordinate_to_offset(&self, coord: Point<f32>) -> Option<usize> {
-        if coord.x < 0.
-            || coord.x >= self.size.width.into_float()
-            || coord.y < 0.
-            || coord.y >= self.size.height.into_float()
-        {
+    pub fn coordinate_to_offset(&self, coord: impl ImageCoordinate) -> Option<usize> {
+        let coord = coord.to_pixel()?;
+        let width = self.size.width.get();
+        let height = self.size.height.get();
+        if coord.x >= width || coord.y >= height {
             return None;
         }
 
-        let offset = coord.x.floor() + coord.y.floor() * self.size.width.into_float();
-        if offset >= 0. {
-            Some(offset as usize)
-        } else {
-            None
-        }
+        usize::try_from(coord.x + coord.y * width).ok()
     }
 }
 
@@ -569,10 +563,118 @@ pub struct ImageLayer<'a> {
 }
 
 impl ImageLayer<'_> {
-    pub fn pixel_mut(&mut self, coord: Point<f32>) -> Option<&mut Pixel> {
+    pub fn pixel(&self, coord: impl ImageCoordinate) -> Option<Pixel> {
+        self.image
+            .coordinate_to_offset(coord)
+            .map(|index| self.image.layers[self.layer].data[index])
+    }
+
+    pub fn pixel_mut(&mut self, coord: impl ImageCoordinate) -> Option<&mut Pixel> {
         self.image
             .coordinate_to_offset(coord)
             .map(|index| &mut self.image.layers[self.layer].data[index])
+    }
+
+    pub fn image(&self) -> &Image {
+        self.image
+    }
+
+    pub fn fill(&mut self, origin: impl ImageCoordinate, color: Pixel) -> bool {
+        fn scan(
+            this: &mut ImageLayer<'_>,
+            lx: u32,
+            rx: u32,
+            y: u32,
+            test_color: Pixel,
+            stack: &mut Vec<Point<u32>>,
+        ) {
+            let mut span_added = false;
+            for x in lx..=rx {
+                if !this.test_pixel(Point::new(x, y), test_color) {
+                    span_added = false;
+                } else if !span_added {
+                    stack.push(Point::new(x, y));
+                    span_added = true;
+                }
+            }
+        }
+
+        let Some(origin) = origin.to_pixel() else {
+            return false;
+        };
+        let Some(test_color) = self.pixel(origin) else {
+            return false;
+        };
+        if test_color == color {
+            return false;
+        }
+
+        let mut stack = vec![origin];
+        while let Some(Point { mut x, y }) = stack.pop() {
+            let mut lx = x;
+            while lx > 0 && self.compare_swap_pixel(Point::new(lx - 1, y), test_color, color) {
+                lx -= 1;
+            }
+            while self.compare_swap_pixel(Point::new(x, y), test_color, color) {
+                x += 1;
+            }
+            if x > 0 {
+                scan(self, lx, x - 1, y + 1, test_color, &mut stack);
+                if y > 0 {
+                    scan(self, lx, x - 1, y - 1, test_color, &mut stack);
+                }
+            }
+        }
+
+        true
+    }
+
+    pub fn test_pixel(&self, coord: impl ImageCoordinate, color: Pixel) -> bool {
+        self.pixel(coord) == Some(color)
+    }
+
+    pub fn compare_swap_pixel(
+        &mut self,
+        coord: impl ImageCoordinate,
+        swap_if_color: Pixel,
+        new_color: Pixel,
+    ) -> bool {
+        let Some(pixel) = self.pixel_mut(coord) else {
+            return false;
+        };
+        if *pixel == swap_if_color {
+            *pixel = new_color;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub trait ImageCoordinate {
+    // fn to_offset(self, image: &Image) -> Option<usize>;
+    fn to_pixel(self) -> Option<Point<u32>>;
+}
+
+impl ImageCoordinate for Point<f32> {
+    fn to_pixel(self) -> Option<Point<u32>> {
+        if self.x.is_sign_positive() && self.y.is_sign_positive() {
+            Some(self.map(|c| c.floor() as u32))
+        } else {
+            None
+        }
+    }
+}
+
+impl ImageCoordinate for Point<u32> {
+    fn to_pixel(self) -> Option<Point<u32>> {
+        Some(self)
+    }
+}
+
+impl ImageCoordinate for Point<UPx> {
+    fn to_pixel(self) -> Option<Point<u32>> {
+        Some(self.map(UPx::get))
     }
 }
 

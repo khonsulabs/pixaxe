@@ -4,7 +4,9 @@ use cushy::figures::Point;
 
 use crate::{ColorHistory, EditOp, ImageLayer, Layer};
 
+mod fill;
 mod pencil;
+pub use fill::Fill;
 pub use pencil::Pencil;
 
 pub struct ImageState<'a> {
