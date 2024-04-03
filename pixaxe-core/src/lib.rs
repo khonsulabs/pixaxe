@@ -11,14 +11,16 @@ use cushy::figures::{Point, Size};
 use cushy::styles::Color;
 use file::File;
 use kempt::Set;
+use muse::symbol::Symbol;
 use q_compress::data_types::NumberLike;
 use rayon::iter::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
 mod file;
-pub mod tools;
 pub use file::FilePos;
+
+pub static BUILTIN_SCRIPT: &str = include_str!("./builtin.muse");
 
 #[derive(Debug)]
 
@@ -405,24 +407,10 @@ pub struct Edit {
     pub file_offset: FilePos,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum EditOp {
-    Paint = 0,
-    Erase,
+    Tool { name: Symbol, alt: bool },
     NewColor,
-}
-
-impl TryFrom<u8> for EditOp {
-    type Error = InvalidEditOp;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Paint),
-            1 => Ok(Self::Erase),
-            2 => Ok(Self::NewColor),
-            _ => Err(InvalidEditOp),
-        }
-    }
 }
 
 pub struct InvalidEditOp;

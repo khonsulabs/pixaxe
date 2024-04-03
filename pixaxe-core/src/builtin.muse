@@ -1,0 +1,27 @@
+pub mod pencil {
+    pub fn update(tool, x, y, editor, initial, alternate) {
+        let color = if alternate {
+            0
+        } else {
+            editor.current_color()
+        };
+        let old_color = editor.set_pixel(x, y, color);
+        old_color != color
+    };
+
+    pub fn complete(tool, editor, alternate) {};
+};
+
+pub mod fill {
+    pub fn update(tool, x, y, editor, initial, alternate) {
+        let color = if alternate {
+            0
+        } else {
+            editor.current_color()
+        };
+        editor.fill(x, y, color)
+    };
+
+    pub fn complete(tool, editor, alternate) {};
+};
+

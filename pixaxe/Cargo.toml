@@ -1,0 +1,14 @@
+[package]
+name = "pixaxe"
+version = "0.0.0"
+edition = "2021"
+license-file = "./LICENSE"
+publish = false
+
+[dependencies]
+cushy = { workspace = true }
+muse = { workspace = true }
+
+bytemuck = "1.15.0"
+rfd = "0.14.1"
+pixaxe-core = { path = "../pixaxe-core" }

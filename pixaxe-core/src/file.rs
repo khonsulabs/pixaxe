@@ -1,3 +1,4 @@
+use core::str;
 use std::borrow::{Borrow, BorrowMut, Cow};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -11,12 +12,13 @@ use cushy::figures::units::UPx;
 use cushy::figures::Size;
 use cushy::styles::Color;
 use kempt::{map, Map};
+use muse::symbol::Symbol;
 use ordered_varint::Variable;
 use q_compress::DEFAULT_COMPRESSION_LEVEL;
 
 use crate::{
-    BlendMode, Edit, EditOp, FileData, Image, ImageChanges, ImageFile, Layer, LayerChange,
-    LayerDelta, LayerId, PaletteChange,
+    BlendMode, Edit, EditOp, FileData, Image, ImageChanges, ImageFile, InvalidEditOp, Layer,
+    LayerChange, LayerDelta, LayerId, PaletteChange,
 };
 
 #[derive(Debug)]
@@ -278,7 +280,16 @@ impl Writeable for Edit {
             .expect("invalid timestamp")
             .as_secs();
         ts.encode_variable(&mut *file)?;
-        file.write_all(&[self.op as u8])?;
+        match &self.op {
+            EditOp::Tool { name, alt } => {
+                file.write_all(&[u8::from(*alt)])?;
+                name.len().encode_variable(&mut *file)?;
+                file.write_all(name.as_bytes())?;
+            }
+            EditOp::NewColor => {
+                file.write_all(&[2])?;
+            }
+        }
         self.changes.layers.len().encode_variable(&mut *file)?;
         for layer in &mut self.changes.layers {
             layer.write_to(file)?;
@@ -307,7 +318,24 @@ impl Readable for Edit {
     ) -> io::Result<Self> {
         let when = u64::decode_variable(&mut reader)?;
         reader.read_exact(scratch.slice_mut(1))?;
-        let op = EditOp::try_from(scratch[0])?;
+        let op = match scratch[0] {
+            alt @ (0 | 1) => {
+                let op_len = usize::decode_variable(&mut reader)?;
+                scratch.resize(op_len);
+                let op = scratch.slice_mut(op_len);
+                reader.read_exact(op)?;
+                let name = Symbol::from(
+                    str::from_utf8(op)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                );
+                EditOp::Tool {
+                    name,
+                    alt: alt != 0,
+                }
+            }
+            2 => EditOp::NewColor,
+            _ => Err(InvalidEditOp)?,
+        };
         let mut changes = ImageChanges::default();
         let layer_changes = usize::decode_variable(&mut reader)?;
         for _ in 0..layer_changes {

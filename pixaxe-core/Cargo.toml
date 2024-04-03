@@ -1,0 +1,16 @@
+[package]
+name = "pixaxe-core"
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+cushy = { workspace = true }
+muse = { workspace = true }
+
+crc32fast = "1.4.0"
+kempt = "0.2.4"
+memchr = "2.7.1"
+ordered-varint = "2.0.0"
+q_compress = "0.11.7"
+rayon = "1.9.0"

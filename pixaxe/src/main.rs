@@ -22,8 +22,12 @@ use cushy::widgets::color::RgbaPicker;
 use cushy::widgets::layers::{OverlayHandle, OverlayLayer};
 use cushy::window::{DeviceId, KeyEvent};
 use cushy::{ConstraintLimit, ModifiersExt, Run};
-use pixaxe::tools::{Fill, ImageState, Pencil, Tool};
-use pixaxe::{ColorHistory, Edit, EditOp, FilePos, Image, ImageFile, Layer, LayerId, Pixel};
+use muse::symbol::{Symbol, SymbolRef};
+use muse::value::Value as MuseValue;
+use pixaxe_core::{ColorHistory, Edit, EditOp, FilePos, Image, ImageFile, Layer, LayerId, Pixel};
+use scripting::EditorScript;
+
+mod scripting;
 
 const CHECKER_LIGHT: Color = Color(0xB0B0B0FF);
 const CHECKER_DARK: Color = Color(0x404040FF);
@@ -63,7 +67,7 @@ fn main() {
             layers: vec![Layer {
                 id: LayerId::first(),
                 data: vec![INITIAL_BACKGROUND; usize::from(INITIAL_WIDTH * INITIAL_HEIGHT)],
-                blend: pixaxe::BlendMode::Average,
+                blend: pixaxe_core::BlendMode::Average,
                 file_offset: FilePos::default(),
             }],
             palette: SWEETIE_16.to_vec(),
@@ -88,10 +92,14 @@ fn main() {
         keyboard_mode: KeyboardMode::default(),
         overlays: overlays.clone(),
         overlay: None,
-        tools: vec![Box::new(Pencil), Box::new(Fill)],
+        tools: vec![Symbol::from("pencil"), Symbol::from("fill")],
         selected_tool: 0,
     });
-    let area = EditArea(data.clone()).make_widget();
+    let area = EditArea {
+        state: data.clone(),
+        script: EditorScript::new(data.clone()),
+    }
+    .make_widget();
     let area_id = area.id();
 
     let palette = Palette::new(data.clone());
@@ -424,8 +432,78 @@ fn save_as(state: Dynamic<EditState>, parent: &impl HasWindowHandle) {
     });
 }
 
-#[derive(Debug, Clone)]
-struct EditArea(Dynamic<EditState>);
+#[derive(Debug, Clone, Copy)]
+struct ToolAction {
+    index: usize,
+    alt: bool,
+}
+
+#[derive(Debug)]
+struct EditArea {
+    state: Dynamic<EditState>,
+    script: EditorScript,
+}
+
+impl EditArea {
+    fn apply_drag_op(
+        &mut self,
+        coord: Point<Px>,
+        context: &mut WidgetContext<'_>,
+        initial: bool,
+    ) -> EventHandling {
+        let mut state = self.state.lock();
+        match state.apply_drag_op(coord, context) {
+            Ok(result) => result,
+            Err(tool) => {
+                let tool_name = &state.tools[tool.index];
+                let coord = state.image_coordinate(coord);
+                let function_path = format!("{tool_name}.update");
+                drop(state);
+                if let MuseValue::Bool(true) = self
+                    .script
+                    .invoke(
+                        function_path,
+                        [
+                            MuseValue::Nil,
+                            MuseValue::from(coord.x),
+                            MuseValue::from(coord.y),
+                            self.script.editor(),
+                            MuseValue::from(initial),
+                            MuseValue::from(tool.alt),
+                        ],
+                    )
+                    .unwrap()
+                {
+                    context.set_needs_redraw();
+                }
+                HANDLED
+            }
+        }
+    }
+
+    fn commit_drag_op(&mut self) {
+        let mut state = self.state.lock();
+        if let Some(tool) = state.commit_drag_op() {
+            let tool_name = state.tools[tool.index].clone();
+            let function_path = SymbolRef::from(format!("{tool_name}.complete"));
+            drop(state);
+            self.script
+                .invoke(
+                    function_path,
+                    [
+                        MuseValue::Nil,
+                        self.script.editor(),
+                        MuseValue::from(tool.alt),
+                    ],
+                )
+                .unwrap();
+            self.state.lock().commit_op(EditOp::Tool {
+                name: tool_name,
+                alt: tool.alt,
+            });
+        }
+    }
+}
 
 #[derive(Debug)]
 struct EditState {
@@ -444,7 +522,7 @@ struct EditState {
     keyboard_mode: KeyboardMode,
     overlays: OverlayLayer,
     overlay: Option<OverlayHandle>,
-    tools: Vec<Box<dyn Tool>>,
+    tools: Vec<Symbol>,
     selected_tool: usize,
 }
 
@@ -457,26 +535,10 @@ impl EditState {
         &mut self,
         coord: Point<Px>,
         context: &mut WidgetContext<'_>,
-        initial: bool,
-    ) -> EventHandling {
+    ) -> Result<EventHandling, ToolAction> {
         if let Some(mode) = self.drag_mode {
             match mode {
-                DragMode::ApplyTool(index, alt) => {
-                    let coord = self.image_coordinate(coord);
-                    if self.tools[index].update(
-                        coord,
-                        self.image.layer_mut(0),
-                        ImageState {
-                            color_history: &self.color_history,
-                            original: &self.file.data.image.layers[0],
-                        },
-                        initial,
-                        alt,
-                    ) {
-                        self.dirty = true;
-                        context.set_needs_redraw();
-                    }
-                }
+                DragMode::ApplyTool(tool) => return Err(tool),
                 DragMode::Scroll {
                     start_scroll,
                     start_location,
@@ -505,34 +567,16 @@ impl EditState {
                 }
             }
 
-            HANDLED
+            Ok(HANDLED)
         } else {
-            IGNORED
+            Ok(IGNORED)
         }
     }
 
-    fn commit_drag_op(&mut self) {
+    fn commit_drag_op(&mut self) -> Option<ToolAction> {
         match self.drag_mode.take() {
-            Some(DragMode::ApplyTool(index, alternate)) => {
-                if let Some(op) = self.tools[index].complete(
-                    self.image.layer_mut(0),
-                    ImageState {
-                        color_history: &self.color_history,
-                        original: &self.file.data.image.layers[0],
-                    },
-                    alternate,
-                ) {
-                    self.commit_op(op);
-                } else {
-                    // TODO roll back?
-                }
-                // self.commit_op(if color.is_some() {
-                //     EditOp::Paint
-                // } else {
-                //     EditOp::Erase
-                // });
-            }
-            None | Some(DragMode::Scroll { .. }) => {}
+            Some(DragMode::ApplyTool(tool)) => Some(tool),
+            None | Some(DragMode::Scroll { .. }) => None,
         }
     }
 
@@ -632,7 +676,7 @@ impl EditState {
 
 impl Widget for EditArea {
     fn redraw(&mut self, context: &mut GraphicsContext<'_, '_, '_, '_>) {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         if state.dirty {
             let state = &mut *state;
             state
@@ -723,12 +767,18 @@ impl Widget for EditArea {
         button: MouseButton,
         context: &mut EventContext<'_>,
     ) -> EventHandling {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         state.keyboard_mode = KeyboardMode::default();
 
         state.drag_mode = match button {
-            MouseButton::Right => Some(DragMode::ApplyTool(state.selected_tool, true)),
-            MouseButton::Left => Some(DragMode::ApplyTool(state.selected_tool, false)),
+            MouseButton::Right => Some(DragMode::ApplyTool(ToolAction {
+                index: state.selected_tool,
+                alt: true,
+            })),
+            MouseButton::Left => Some(DragMode::ApplyTool(ToolAction {
+                index: state.selected_tool,
+                alt: false,
+            })),
             MouseButton::Middle => Some(DragMode::Scroll {
                 start_scroll: state.scroll,
                 start_location: location,
@@ -736,7 +786,8 @@ impl Widget for EditArea {
             _ => None,
         };
 
-        state.apply_drag_op(location, context, true)
+        drop(state);
+        self.apply_drag_op(location, context, true)
     }
 
     fn mouse_drag(
@@ -746,8 +797,7 @@ impl Widget for EditArea {
         _button: MouseButton,
         context: &mut EventContext<'_>,
     ) {
-        let mut state = self.0.lock();
-        state.apply_drag_op(location, context, false);
+        self.apply_drag_op(location, context, false);
     }
 
     fn mouse_up(
@@ -757,8 +807,7 @@ impl Widget for EditArea {
         _button: MouseButton,
         _context: &mut EventContext<'_>,
     ) {
-        let mut state = self.0.lock();
-        state.commit_drag_op();
+        self.commit_drag_op();
     }
 
     fn hit_test(&mut self, _location: Point<Px>, _context: &mut EventContext<'_>) -> bool {
@@ -770,7 +819,7 @@ impl Widget for EditArea {
         location: Point<Px>,
         _context: &mut EventContext<'_>,
     ) -> Option<CursorIcon> {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         state.hovered = Some(location);
         state
             .image
@@ -779,14 +828,14 @@ impl Widget for EditArea {
     }
 
     fn unhover(&mut self, _context: &mut EventContext<'_>) {
-        let mut state = self.0.lock();
+        let mut state = self.state.lock();
         state.hovered = None;
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum DragMode {
-    ApplyTool(usize, bool),
+    ApplyTool(ToolAction),
     Scroll {
         start_scroll: Point<Px>,
         start_location: Point<Px>,

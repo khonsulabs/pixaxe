@@ -1,18 +1,16 @@
-[package]
-name = "pixaxe"
-version = "0.0.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = ["pixaxe", "pixaxe-core"]
 
-[dependencies]
-bytemuck = "1.15.0"
-crc32fast = "1.4.0"
-cushy = { path = "../cushy" }
-kempt = "0.2.4"
-memchr = "2.7.1"
-ordered-varint = "2.0.0"
-q_compress = "0.11.7"
-rayon = "1.9.0"
-rfd = "0.14.1"
+# [patch."https://github.com/khonsulabs/kludgine"]
+# kludgine = { path = "../kludgine" }
+# [patch."https://github.com/khonsulabs/refuse"]
+# refuse = { path = "../refuse" }
+# refuse-pool = { path = "../refuse/refuse-pool" }
 
-[patch."https://github.com/khonsulabs/kludgine"]
-kludgine = { path = "../kludgine" }
+[workspace.dependencies]
+cushy = { git = "https://github.com/khonsulabs/cushy" }
+muse = { git = "https://github.com/khonsulabs/muse" }
+
+# cushy = { path = "../cushy" }
+# muse = { path = "../muse" }

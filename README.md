@@ -22,3 +22,14 @@ publishing and sharing pixel art.
   - Write custom layer blending functions
   - Write dynamic layers
   - Define shortcut mappings
+
+## Licenses
+
+The [`pixaxe/`](./pixaxe/) directory is licensed under the [Pixaxe
+License](./pixaxe/LICENSE.md), while all other contents of this repository are
+licensed under the [MIT License](./pixaxe-core/LICENSE). The Pixaxe License is a
+restricted, source-available license that has a future license grant of the MIT
+License after two years.
+
+Redistributing unmodified copies of Pixaxe and/or its source made available
+under these licenses will always be permitted.
